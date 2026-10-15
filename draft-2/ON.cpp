@@ -7,6 +7,9 @@ using namespace std;
 
 vector<vector<int>> configfile(string &file){
     ifstream fin(file);
+    if(!fin){
+        cerr<<"unable to open file\n";return{};
+    }
 
     vector<vector<int>> dummy;
     string line;
@@ -14,15 +17,28 @@ vector<vector<int>> configfile(string &file){
         if(!line.empty() && line.back()=='\r')line.pop_back();
         int st_ind=line.find_first_not_of(" \t");
         if(st_ind==string::npos)continue;
+        if(line[st_ind]=='#')continue;
         istringstream ss(line.substr(st_ind));
         vector<int> row;
-        string x;
+        int x;
         while(ss>>x){
-            row.push_back(stoi(x));
+            if( (x!=-1) && (x<=0) ){cerr<<"Invalid cost\n";return{};}
+            row.push_back(x);
         }
         dummy.push_back(row);
     }
-    int n=dummy[0].size()+1;
+    int n=dummy.size();
+    if(n==0){
+        cerr<<"Empty config file\n";
+        return {};
+    }
+    for(int i=0;i<n;i++){
+        if(dummy[i].size()!=(n-i)){
+            cerr<<"Invalid config entries\n";
+            return{};
+        }
+    }
+    n++;
     vector<vector<int>> cost(n,vector<int>(n,-1));
     for(int i=0;i<n;i++)cost[i][i]=0;
     for(int i=0;i<(n-1);i++){
