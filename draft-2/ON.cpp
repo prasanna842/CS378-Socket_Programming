@@ -3,6 +3,7 @@
 #include<sys/socket.h>
 #include<netinet/in.h>
 #include<arpa/inet.h>
+#include<unistd.h>
 using namespace std;
 
 vector<vector<int>> configfile(string &file){
@@ -51,15 +52,26 @@ vector<vector<int>> configfile(string &file){
     return cost;
 }
 
-void send_link_state(int clfd,int ind,const vector<vector<int>>& cost_matrix, vector<int>& ports, vector<string>& ip){
+void send_link_state(int clfd,int ind,const vector<vector<int>>& cost_matrix, vector<int>& ports, vector<uint32_t>& ip){
     int n= cost_matrix.size();
     string tup;
+    int num_neigh=0;
     for(int i=0;i<n;i++){
         if(cost_matrix[ind][i]>=0){
-            tup+=string(1,char('A'+i))+","+ip[i]+","+to_string(ports[i])+","+to_string(cost_matrix[ind][i])+"\n";
+            tup+=char('A'+i);
+            tup.append((char*)&ip[i],4);
+            uint16_t port=htons(ports[i]);
+            tup.append((char*)&port,2);
+            uint32_t cost = htonl(cost_matrix[ind][i]);
+            tup.append((char*)&cost,4);
+            num_neigh++;
         }
     }
-    send(clfd,tup.c_str(),tup.size(),0);
+    string to_send;
+    to_send+=char(2); // 2- LINK STATE messages
+    to_send+=char(num_neigh);
+    to_send+=tup;
+    send(clfd,to_send.c_str(),to_send.size(),0);
 }
 int main(int argc, char* argv[]){
     if(argc<=1){
@@ -75,7 +87,7 @@ int main(int argc, char* argv[]){
     }
 
     vector<int> VNs(n,-1);
-    vector<string> ip(n);
+    vector<uint32_t> ip(n);
     vector<int> ports(n);
 
     int socfd,new_fd;
@@ -87,17 +99,23 @@ int main(int argc, char* argv[]){
     my_addr.sin_port = htons(5000);
     my_addr.sin_addr.s_addr = INADDR_ANY;
 
-    bind(socfd,(struct sockaddr*)&my_addr, sizeof(my_addr));
-    listen(socfd, 10);
+    if(bind(socfd,(struct sockaddr*)&my_addr, sizeof(my_addr))<0){
+        perror("bind");
+        return 1;
+    }
+    if(listen(socfd, 10)<0){
+        perror("listen");
+        return 1;
+    };
 
     for(int i=0;i<n;i++){
         int cl=accept(socfd,nullptr,nullptr);
-        char buf[128]={};
-        ssize_t bytes = recv(cl,buf,sizeof(buf),0);
-        string info(buf,bytes);
-        size_t sep=info.find(',');
-        ip[i]=info.substr(0,sep);
-        ports[i]=stoi(info.substr(sep+1));
+        char buf[7];
+        recv(cl,buf,7,0);
+        memcpy(&ip[i],buf+1,4);
+        uint16_t p;
+        memcpy(&p,buf+5,2);
+        ports[i]=ntohs(p);
         VNs[i]=cl;
     }
     for(int i=0; i<n;i++){
