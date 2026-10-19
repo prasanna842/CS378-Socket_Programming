@@ -39,6 +39,24 @@ char* send_link_state(){
     return msg;
 }
 
+void read_ls_msg(char* msg, int& changed){
+    int ind =9;
+    int ncnt;
+    memcpy(&ncnt,msg[1],4);
+    for(int i=0;i<ncnt;i++){
+        char x,y;
+        int c;
+        memcpy(&x,msg[ind],1);
+        memcpy(&y,msg[ind+1],1);
+        memcpy(&c,msg[ind+2],4);
+        ind+=6;
+        if(graph[x][y]!=c){
+            changed=1;
+            graph[x][y]=c;
+        }
+    }
+}
+
 int main(int argc, char* argv[]){
     if(argc!=4){
         fprintf(stderr,"insufficient args\n");
@@ -105,6 +123,16 @@ int main(int argc, char* argv[]){
     }
     while(1){
         clock_t st=clock();
+        while(((double)(clock()-st)/CLOCKS_PER_SEC)<=20){
+            int found_new=0;
+            char buf[1028];
+            recvfrom(socfd_udp,buf,strlen(buf),0,nullptr,nullptr);
+            read_ls_msg(buf,found_new);
+
+
+            //iffound_new=1 => resend stuff again
+        }
+
         //flood
         for(int i=0;i<26;i++){
             if(neigh[i]==1){
