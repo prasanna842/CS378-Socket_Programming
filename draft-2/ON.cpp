@@ -12,12 +12,11 @@ vector<vector<int>> configfile(string &file){
     if(!fin){
         cerr<<"unable to open file\n";return{};
     }
-
     vector<vector<int>> dummy;
     string line;
     while(getline(fin,line)){
         if(!line.empty() && line.back()=='\r')line.pop_back();
-        int st_ind=line.find_first_not_of(" \t");
+        size_t st_ind=line.find_first_not_of(" \t");
         if(st_ind==string::npos)continue;
         if(line[st_ind]=='#')continue;
         istringstream ss(line.substr(st_ind));
@@ -27,11 +26,19 @@ vector<vector<int>> configfile(string &file){
             if( (x!=-1) && (x<=0) ){cerr<<"Invalid cost\n";return{};}
             row.push_back(x);
         }
+        if(!ss.eof()){
+            cerr<<"Invalid token in config line \n";
+            return {};
+        }
         dummy.push_back(row);
     }
     int n=dummy.size();
     if(n==0){
         cerr<<"Empty config file\n";
+        return {};
+    }
+    if(n+1>26){
+        cerr<<"Nodes exceeding 26\n";
         return {};
     }
     for(int i=0;i<n;i++){
@@ -72,8 +79,9 @@ void send_link_state(int clfd,int ind,const vector<vector<int>>& cost_matrix, ve
     to_send+=char(2); // 2- LINK STATE messages
     to_send+=char(num_neigh);
     to_send+=tup;
-    send(clfd,to_send.c_str(),to_send.size(),0);
+    send(clfd,to_send.c_str(),to_send.size(),MSG_NOSIGNAL);
 }
+
 int main(int argc, char* argv[]){
     if(argc<=1){
         cerr<<"give config file";
@@ -82,6 +90,11 @@ int main(int argc, char* argv[]){
     string file=argv[1];
     auto costmat=configfile(file);
     int n=costmat.size();
+    if(n==0){
+        cerr<<"ON: Invalid initial congig \n";
+        return 1;
+    }
+
     for(auto v:costmat){
         for(auto x:v)cout<<x<<" ";
         cout<<endl;
@@ -94,7 +107,6 @@ int main(int argc, char* argv[]){
     vector<uint32_t> ip(n);
     vector<int> ports(n);
     int cnt=0;
-
     vector<int> fd_ind(FD_SETSIZE,-1);
     fd_set master;
     fd_set read_fds;
@@ -128,16 +140,49 @@ int main(int argc, char* argv[]){
     };
     FD_SET(socfd,&master);
     fdmax=socfd;
+    bool send_now = false;
+
+    auto first_free=[&]()->int{
+        for(int i=0;i<n;i++){
+            if(VNs[i]==-1) return i;
+        }
+        return -1;
+    };
+
+    auto assign=[&](int fd,int slot)->bool{
+        unsigned char b[7];
+        int r=recv(fd,b,7,MSG_WAITALL);
+        if(r!=7 || b[0]!=1){
+            cerr<<"Dropping COnnection, bad info \n";
+            close(fd);
+            return false;
+        }
+        FD_SET(fd,&master);
+        if(fd>fdmax) fdmax=fd;
+        fd_ind[fd]=slot;
+        VNs[slot]=fd;
+        memcpy(&ip[slot],b+1,4);
+        uint16_t p;
+        memcpy(&p,b+5,2);
+        ports[slot]=ntohs(p);
+        cnt++;
+        struct in_addr a;
+        a.s_addr=ip[slot];
+        cout<<"ON : node"<<char('A'+slot)<<" = "<<inet_ntoa(a)<<":"<<ports[slot]<<"connected \n";
+        if(cnt==n) send_now=true;
+        return true;
+    };
+
     while(true){
         read_fds=master;
         struct timeval tv;
         tv.tv_sec=1;
         tv.tv_usec=0;
         if(select(fdmax+1,&read_fds,NULL,NULL,&tv)==-1){
+            if(errno==EINTR) continue;
             perror("select");
             return 1;
         }
-        bool send_now=false;
 
         for(int i=0;i<=fdmax;i++){
             if(!FD_ISSET(i,&read_fds)) continue;
@@ -149,39 +194,12 @@ int main(int argc, char* argv[]){
                     cerr<<"too many connections\n";
                     close(new_fd);
                 }else{
-                    FD_SET(new_fd,&master);
-                    if(new_fd>fdmax) fdmax=new_fd;
-                    int slot=-1;
-                    for(int i=0;i<n;i++){
-                        if(VNs[i]==-1){
-                            slot=i;
-                            break;
-                        }
-                    }
-                    fd_ind[new_fd]=slot;
+                    int slot=first_free();
                     if(slot>=0){
-                        unsigned char buf[7];
-                        int r=recv(new_fd,buf,7,MSG_WAITALL);
-                        if(r!=7 || buf[0]!=1){
-                            cerr<<"ON : dropping connection, bad info\n";
-                            close(new_fd);
-                            FD_CLR(new_fd,&master);
-                            fd_ind[new_fd]=-1;
-                        }else{
-                            VNs[slot]=new_fd;
-                            memcpy(&ip[slot],buf+1,4);
-                            uint16_t p;
-                            memcpy(&p,buf+5,2);
-                            ports[slot]=ntohs(p);
-                            cnt++;
-                            struct in_addr a;
-                            a.s_addr=ip[slot];
-                            cout<<"ON : node"<<char('A'+slot)<<" = "<<inet_ntoa(a)<<":"<<ports[slot]<<"connected \n";
-
-                            if(cnt==n) send_now=true;
-                        }
+                        assign(new_fd,slot);
                     }else{
-                            cout<<"ON : This connection is an extra node"<<endl;
+                        close(new_fd); // 
+                        cout<<"Extra Node detected \n";
                     }
                 }
             }else{
@@ -206,14 +224,9 @@ int main(int argc, char* argv[]){
         if(prev_time!=0 && prev_time != last_time){
             last_time = prev_time;
             vector<vector<int>> newmat=configfile(file);
-            if(newmat.empty() ){
+            if(newmat.empty() || (int)newmat.size()!=n ){
                 cerr<<"ON : invalid file\n";
             }else{
-                int newn=newmat.size();
-                VNs.resize(newn,-1);
-                ip.resize(newn,0);
-                ports.resize(newn,0);
-                n=newn;
                 costmat=newmat;
                 cout<<"ON: Configuration changed : "<<endl;
                 for(auto v:costmat){
@@ -223,7 +236,7 @@ int main(int argc, char* argv[]){
                 if(cnt==n) send_now=true;
             }
         }
-        if(send_now){
+        if(send_now && cnt==n){
             for(int i=0;i<n;i++){
                 send_link_state(VNs[i],i,costmat,ports,ip);
             }
@@ -231,5 +244,4 @@ int main(int argc, char* argv[]){
             send_now=false;
         }
     } 
-    close(socfd);
 }
