@@ -3,6 +3,7 @@
 #include<sys/socket.h>
 #include<netinet/in.h>
 #include<arpa/inet.h>
+#include<sys/stat.h>
 #include<unistd.h>
 using namespace std;
 
@@ -85,20 +86,38 @@ int main(int argc, char* argv[]){
         for(auto x:v)cout<<x<<" ";
         cout<<endl;
     }
-
+    long long last_time;
+    struct stat st;
+    if(stat(file.c_str(),&st)<0) last_time=0;
+    else last_time= (long long)st.st_mtim.tv_sec*1000000000LL + st.st_mtim.tv_nsec;
     vector<int> VNs(n,-1);
     vector<uint32_t> ip(n);
     vector<int> ports(n);
+    int cnt=0;
 
+    vector<int> fd_ind(FD_SETSIZE,-1);
+    fd_set master;
+    fd_set read_fds;
+    int fdmax;
+    int yes=1;
+    FD_ZERO(&master);
+    FD_ZERO(&read_fds);
     int socfd,new_fd;
     struct sockaddr_in my_addr;
     struct sockaddr_in their_addr;
     socklen_t len;
-    socfd=socket(AF_INET,SOCK_STREAM,0);
+    if((socfd=socket(AF_INET,SOCK_STREAM,0))==-1){
+        perror("socket");
+        return 1;
+    }
+    if(setsockopt(socfd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(int))==-1){
+        perror("setsockopt");
+        return 1;
+    }
     my_addr.sin_family = AF_INET;
     my_addr.sin_port = htons(5000);
     my_addr.sin_addr.s_addr = INADDR_ANY;
-
+    memset(&(my_addr.sin_zero),'\0',8);
     if(bind(socfd,(struct sockaddr*)&my_addr, sizeof(my_addr))<0){
         perror("bind");
         return 1;
@@ -107,20 +126,110 @@ int main(int argc, char* argv[]){
         perror("listen");
         return 1;
     };
+    FD_SET(socfd,&master);
+    fdmax=socfd;
+    while(true){
+        read_fds=master;
+        struct timeval tv;
+        tv.tv_sec=1;
+        tv.tv_usec=0;
+        if(select(fdmax+1,&read_fds,NULL,NULL,&tv)==-1){
+            perror("select");
+            return 1;
+        }
+        bool send_now=false;
 
-    for(int i=0;i<n;i++){
-        int cl=accept(socfd,nullptr,nullptr);
-        char buf[7];
-        recv(cl,buf,7,0);
-        memcpy(&ip[i],buf+1,4);
-        uint16_t p;
-        memcpy(&p,buf+5,2);
-        ports[i]=ntohs(p);
-        VNs[i]=cl;
-    }
-    for(int i=0; i<n;i++){
-        send_link_state(VNs[i],i,costmat,ports,ip);
-        close(VNs[i]);
-    }
+        for(int i=0;i<=fdmax;i++){
+            if(!FD_ISSET(i,&read_fds)) continue;
+            if(i==socfd){ // new connction 
+                len=sizeof(their_addr);
+                if((new_fd=accept(socfd,(struct sockaddr*)&their_addr,&len))==-1){
+                    perror("accept");
+                }else if(new_fd>=FD_SETSIZE){
+                    cerr<<"too many connections\n";
+                    close(new_fd);
+                }else{
+                    FD_SET(new_fd,&master);
+                    if(new_fd>fdmax) fdmax=new_fd;
+                    int slot=-1;
+                    for(int i=0;i<n;i++){
+                        if(VNs[i]==-1){
+                            slot=i;
+                            break;
+                        }
+                    }
+                    fd_ind[new_fd]=slot;
+                    if(slot>=0){
+                        unsigned char buf[7];
+                        int r=recv(new_fd,buf,7,MSG_WAITALL);
+                        if(r!=7 || buf[0]!=1){
+                            cerr<<"ON : dropping connection, bad info\n";
+                            close(new_fd);
+                            FD_CLR(new_fd,&master);
+                            fd_ind[new_fd]=-1;
+                        }else{
+                            VNs[slot]=new_fd;
+                            memcpy(&ip[slot],buf+1,4);
+                            uint16_t p;
+                            memcpy(&p,buf+5,2);
+                            ports[slot]=ntohs(p);
+                            cnt++;
+                            struct in_addr a;
+                            a.s_addr=ip[slot];
+                            cout<<"ON : node"<<char('A'+slot)<<" = "<<inet_ntoa(a)<<":"<<ports[slot]<<"connected \n";
+
+                            if(cnt==n) send_now=true;
+                        }
+                    }else{
+                            cout<<"ON : This connection is an extra node"<<endl;
+                    }
+                }
+            }else{
+                char some[256];
+                int nbytes=recv(i,some,sizeof(some),0);
+                if(nbytes<=0){
+                    int slot=fd_ind[i];
+                    close(i);
+                    FD_CLR(i,&master);
+                    fd_ind[i]=-1;
+                    if(slot>=0){
+                        VNs[slot]=-1;
+                        cnt--;
+                    }
+                }
+            }
+        }
+        long long prev_time;
+        struct stat st;
+        if(stat(file.c_str(),&st)<0) prev_time=0;
+        else prev_time= (long long)st.st_mtim.tv_sec*1000000000LL + st.st_mtim.tv_nsec;
+        if(prev_time!=0 && prev_time != last_time){
+            last_time = prev_time;
+            vector<vector<int>> newmat=configfile(file);
+            if(newmat.empty() ){
+                cerr<<"ON : invalid file\n";
+            }else{
+                int newn=newmat.size();
+                VNs.resize(newn,-1);
+                ip.resize(newn,0);
+                ports.resize(newn,0);
+                n=newn;
+                costmat=newmat;
+                cout<<"ON: Configuration changed : "<<endl;
+                for(auto v:costmat){
+                    for(auto x:v)cout<<x<<" ";
+                    cout<<endl;
+                }
+                if(cnt==n) send_now=true;
+            }
+        }
+        if(send_now){
+            for(int i=0;i<n;i++){
+                send_link_state(VNs[i],i,costmat,ports,ip);
+            }
+            cout<<"LINK STATE sent to all \n";
+            send_now=false;
+        }
+    } 
     close(socfd);
 }
