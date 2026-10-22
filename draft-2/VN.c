@@ -20,6 +20,7 @@ int neighPort[26];
 int neighCost[26];
 int neigh[26];
 uint32_t prev_seq[26]={0};
+int seen_seq[26]={0};
 int seq_num=0;
 int graph[26][26] ={-1};
 
@@ -61,7 +62,7 @@ void send_link_state(int fd_udp){
 }
 
 int read_ls_msg(char* msg, int len){ //return 1-new , 0-old, -1-error
-    if(msg[0]!=3 || (len<7))return -1;
+    if( (len<7) ||  (msg[0]!=3) )return -1;
     char org=msg[1];
     if(org==myId)return 0;
     if((org<'A') || (org>'Z'))return -1;
@@ -80,8 +81,9 @@ int read_ls_msg(char* msg, int len){ //return 1-new , 0-old, -1-error
     memcpy(&seq,msg+3,4);
     seq=ntohl(seq);
 
-    if(seq<=prev_seq[org-'A'])return 0 ;
+    if( (seen_seq[org-'A']) && (seq<=prev_seq[org-'A']) )return 0 ;
     prev_seq[org-'A']=seq;
+    seen_seq[org-'A']=1;
 
     for(int i=0;i<26;i++){
         graph[org-'A'][i]=-1;
@@ -101,10 +103,19 @@ int read_ls_msg(char* msg, int len){ //return 1-new , 0-old, -1-error
 }
 
 void show_graph(){
-    printf("  ---  Current Known Graph  ---  \n");
+    int mx=-1;
     for(int i=0;i<26;i++){
         for(int j=0;j<26;j++){
-            if(graph[i][j]==-1 || i>=j)continue;
+            if(i!=j && graph[i][j]!=-1){
+                if(i>mx)mx=i;
+                if(j>mx)mx=j;
+            }
+        }
+    }
+    printf("  ---  Current Known Graph  ---  \n");
+    for(int i=0;i<mx;i++){
+        for(int j=0;j<=mx;j++){
+            if(j<=i);
             else printf("%d ",graph[i][j]);
         }
         printf("\n");
@@ -163,11 +174,6 @@ int read_on(int socfd_tcp){ //0 - bad
             graph[t[0]-'A'][myId-'A']=ntohl(cost);
         }
     }
-    printf("%c=0\n",myId);
-    for(int k=0;k<26;k++){
-        if(neigh[k]==1)printf("%c=%d\n",neighId[k],neighCost[k]);
-    }
-    printf("\n");
     return 1;
 }
 
