@@ -20,7 +20,7 @@ int neighPort[26];
 int neighCost[26];
 int neigh[26];
 uint32_t prev_seq[26]={0};
-int seen_seq[26]={0};
+int seen_pkt[26]={0};
 int seq_num=0;
 int graph[26][26] ={-1};
 
@@ -38,7 +38,7 @@ void flood(int udp_fd,char* msg,int l,struct sockaddr_in *from){
 }
 
 void send_link_state(int fd_udp){
-    //  (3-LSP msg)-1,org-id-1,neighcnt -1,seq - 4, (ls_org_id -1, cost - 4)*neighcnt
+    //  (3-LSP msg)-1,org-id-1,neighcnt -1,seq - 4, (org_neigh_id -1, cost - 4)*neighcnt
     if(myId==0)return;
     uint8_t neighcnt=0;
     for(int i=0;i<26;i++)if(neigh[i]==1)neighcnt++;
@@ -81,9 +81,9 @@ int read_ls_msg(char* msg, int len){ //return 1-new , 0-old, -1-error
     memcpy(&seq,msg+3,4);
     seq=ntohl(seq);
 
-    if( (seen_seq[org-'A']) && (seq<=prev_seq[org-'A']) )return 0 ;
+    if( (seen_pkt[org-'A']) && (seq<=prev_seq[org-'A']) )return 0 ;
     prev_seq[org-'A']=seq;
-    seen_seq[org-'A']=1;
+    seen_pkt[org-'A']=1;
 
     for(int i=0;i<26;i++){
         graph[org-'A'][i]=-1;
@@ -122,7 +122,7 @@ void show_graph(){
     }
 }
 
-int read_on(int socfd_tcp){ //0 - bad
+int read_ON(int socfd_tcp){ //0 - bad
     char header[2];
     if(recv(socfd_tcp,header,2,MSG_WAITALL)!=2) return 0;
     int count =(unsigned char) header[1];
@@ -139,11 +139,15 @@ int read_on(int socfd_tcp){ //0 - bad
             break;
         }
     }
-    if(me<0)return 1;
+    if(me<0){
+        fprintf(stderr,"VN: link state has no selftuple");
+        return -1;
+    }
     myId=msg[me*11];
     if((myId<'A') || (myId>'Z')){
         myId=0;
-        return 1;
+        fprintf(stderr,"VN: Node Id out of bounds");
+        return -1;
     }
 
     memset(neigh,0,sizeof(neigh));
@@ -174,6 +178,14 @@ int read_on(int socfd_tcp){ //0 - bad
             graph[t[0]-'A'][myId-'A']=ntohl(cost);
         }
     }
+
+    printf("%c=0",myId);
+    for(int i=0;i<26;i++){
+        if(neigh[i]==1){
+            printf(",%c=%d",neighId[i],neighCost[i]);
+        }
+    }
+    printf("\n");
     return 1;
 }
 
@@ -192,7 +204,7 @@ int main(int argc, char* argv[]){
     int socfd_tcp=socket(AF_INET,SOCK_STREAM,0);
     int socfd_udp=socket(AF_INET,SOCK_DGRAM,0);
     if((socfd_tcp<0) || (socfd_udp<0)){
-        perror("socket creation failes");
+        perror("socket creation failed");
         return 1;
     }
 
@@ -228,7 +240,7 @@ int main(int argc, char* argv[]){
 
     int tcp_present=1;
     int mxfd;
-    time_t last=0;
+    time_t last=time(NULL);
     while(1){
         fd_set rfs;
         FD_ZERO(&rfs);
@@ -248,8 +260,12 @@ int main(int argc, char* argv[]){
         }
 
         if((rr>0) && tcp_present && FD_ISSET(socfd_tcp,&rfs)){
-            if(read_on(socfd_tcp)) last=0;
-            else{
+            int r=read_ON(socfd_tcp);
+            if(r==1){
+                send_link_state(socfd_udp);
+                last=time(NULL);
+            }
+            if(r==0){
                 close(socfd_tcp);
                 tcp_present=0;
             }
@@ -264,7 +280,7 @@ int main(int argc, char* argv[]){
         }
 
         time_t pres=time(NULL);
-        if((pres-last)>=20){
+        if((pres-last)>=10){
             send_link_state(socfd_udp);
             last=pres;
             show_graph();
